@@ -3,6 +3,8 @@ import SlideNumber from './controllers/slidenumber.js'
 import JumpToSlide from './controllers/jumptoslide.js'
 import Backgrounds from './controllers/backgrounds.js'
 import AutoAnimate from './controllers/autoanimate.js'
+import ScrollView from './controllers/scrollview.js'
+import PrintView from './controllers/printview.js'
 import Fragments from './controllers/fragments.js'
 import Overview from './controllers/overview.js'
 import Keyboard from './controllers/keyboard.js'
@@ -11,7 +13,7 @@ import Controls from './controllers/controls.js'
 import Progress from './controllers/progress.js'
 import Pointer from './controllers/pointer.js'
 import Plugins from './controllers/plugins.js'
-import Print from './controllers/print.js'
+import Overlay from './controllers/overlay.js'
 import Touch from './controllers/touch.js'
 import Focus from './controllers/focus.js'
 import Notes from './controllers/notes.js'
@@ -27,7 +29,7 @@ import {
 } from './utils/constants.js'
 
 // The reveal.js version
-export const VERSION = '4.6.0';
+export const VERSION = '5.2.1';
 
 /**
  * reveal.js
@@ -49,6 +51,9 @@ export default function( revealElement, options ) {
 
 	// Configuration defaults, can be overridden at initialization time
 	let config = {},
+
+		// Flags if initialize() has been invoked for this reveal instance
+		initialized = false,
 
 		// Flags if reveal.js is loaded (has dispatched the 'ready' event)
 		ready = false,
@@ -105,6 +110,8 @@ export default function( revealElement, options ) {
 		jumpToSlide = new JumpToSlide( Reveal ),
 		autoAnimate = new AutoAnimate( Reveal ),
 		backgrounds = new Backgrounds( Reveal ),
+		scrollView = new ScrollView( Reveal ),
+		printView = new PrintView( Reveal ),
 		fragments = new Fragments( Reveal ),
 		overview = new Overview( Reveal ),
 		keyboard = new Keyboard( Reveal ),
@@ -113,7 +120,7 @@ export default function( revealElement, options ) {
 		progress = new Progress( Reveal ),
 		pointer = new Pointer( Reveal ),
 		plugins = new Plugins( Reveal ),
-		print = new Print( Reveal ),
+		overlay = new Overlay( Reveal ),
 		focus = new Focus( Reveal ),
 		touch = new Touch( Reveal ),
 		notes = new Notes( Reveal );
@@ -124,6 +131,10 @@ export default function( revealElement, options ) {
 	function initialize( initOptions ) {
 
 		if( !revealElement ) throw 'Unable to find presentation root (<div class="reveal">).';
+
+		if( initialized ) throw 'Reveal.js has already been initialized.';
+
+		initialized = true;
 
 		// Cache references to key DOM elements
 		dom.wrapper = revealElement;
@@ -139,6 +150,11 @@ export default function( revealElement, options ) {
 		// 4. Options passed to Reveal.initialize
 		// 5. Query params
 		config = { ...defaultConfig, ...config, ...options, ...initOptions, ...Util.getQueryHash() };
+
+		// Legacy support for the ?print-pdf query
+		if( /print-pdf/gi.test( window.location.search ) ) {
+			config.view = 'print';
+		}
 
 		setViewport();
 
@@ -178,6 +194,9 @@ export default function( revealElement, options ) {
 	 */
 	function start() {
 
+		// Don't proceed if this instance has been destroyed
+		if( initialized === false ) return;
+
 		ready = true;
 
 		// Remove slides hidden with data-visibility
@@ -201,11 +220,14 @@ export default function( revealElement, options ) {
 		// Updates the presentation to match the current configuration values
 		configure();
 
-		// Read the initial hash
-		location.readURL();
-
 		// Create slide backgrounds
 		backgrounds.update( true );
+
+		// Activate the print/scroll view if configured
+		activateInitialView();
+
+		// Read the initial hash
+		location.readURL();
 
 		// Notify listeners that the presentation is ready but use a 1ms
 		// timeout to ensure it's not fired synchronously after #initialize()
@@ -225,19 +247,41 @@ export default function( revealElement, options ) {
 			});
 		}, 1 );
 
-		// Special setup and config is required when printing to PDF
-		if( print.isPrintingPDF() ) {
-			removeEventListeners();
+	}
 
-			// The document needs to have loaded for the PDF layout
-			// measurements to be accurate
-			if( document.readyState === 'complete' ) {
-				print.setupPDF();
+	/**
+	 * Activates the correct reveal.js view based on our config.
+	 * This is only invoked once during initialization.
+	 */
+	function activateInitialView() {
+
+		const activatePrintView = config.view === 'print';
+		const activateScrollView = config.view === 'scroll' || config.view === 'reader';
+
+		if( activatePrintView || activateScrollView ) {
+
+			if( activatePrintView ) {
+				removeEventListeners();
 			}
 			else {
-				window.addEventListener( 'load', () => {
-					print.setupPDF();
-				} );
+				touch.unbind();
+			}
+
+			// Avoid content flickering during layout
+			dom.viewport.classList.add( 'loading-scroll-mode' );
+
+			if( activatePrintView ) {
+				// The document needs to have loaded for the PDF layout
+				// measurements to be accurate
+				if( document.readyState === 'complete' ) {
+					printView.activate();
+				}
+				else {
+					window.addEventListener( 'load', () => printView.activate() );
+				}
+			}
+			else {
+				scrollView.activate();
 			}
 		}
 
@@ -385,7 +429,7 @@ export default function( revealElement, options ) {
 	function setupScrollPrevention() {
 
 		setInterval( () => {
-			if( dom.wrapper.scrollTop !== 0 || dom.wrapper.scrollLeft !== 0 ) {
+			if( !scrollView.isActive() && dom.wrapper.scrollTop !== 0 || dom.wrapper.scrollLeft !== 0 ) {
 				dom.wrapper.scrollTop = 0;
 				dom.wrapper.scrollLeft = 0;
 			}
@@ -452,8 +496,8 @@ export default function( revealElement, options ) {
 		dom.wrapper.setAttribute( 'data-background-transition', config.backgroundTransition );
 
 		// Expose our configured slide dimensions as custom props
-		dom.viewport.style.setProperty( '--slide-width', config.width + 'px' );
-		dom.viewport.style.setProperty( '--slide-height', config.height + 'px' );
+		dom.viewport.style.setProperty( '--slide-width', typeof config.width === 'string' ? config.width :  config.width + 'px' );
+		dom.viewport.style.setProperty( '--slide-height', typeof config.height === 'string' ? config.height :  config.height + 'px' );
 
 		if( config.shuffle ) {
 			shuffle();
@@ -466,16 +510,6 @@ export default function( revealElement, options ) {
 		// Exit the paused mode if it was configured off
 		if( config.pause === false ) {
 			resume();
-		}
-
-		// Iframe link previews
-		if( config.previewLinks ) {
-			enablePreviewLinks();
-			disablePreviewLinks( '[data-preview-link=false]' );
-		}
-		else {
-			disablePreviewLinks();
-			enablePreviewLinks( '[data-preview-link]:not([data-preview-link=false])' );
 		}
 
 		// Reset all changes made by auto-animations
@@ -572,13 +606,19 @@ export default function( revealElement, options ) {
 	 */
 	function destroy() {
 
+		initialized = false;
+
+		// There's nothing to destroy if this instance hasn't finished
+		// initializing
+		if( ready === false ) return;
+
 		removeEventListeners();
 		cancelAutoSlide();
-		disablePreviewLinks();
 
 		// Destroy controllers
 		notes.destroy();
 		focus.destroy();
+		overlay.destroy();
 		plugins.destroy();
 		pointer.destroy();
 		controls.destroy();
@@ -690,6 +730,26 @@ export default function( revealElement, options ) {
 	}
 
 	/**
+	 * Dispatches a slidechanged event.
+	 *
+	 * @param {string} origin Used to identify multiplex clients
+	 */
+	function dispatchSlideChanged( origin ) {
+
+		dispatchEvent({
+			type: 'slidechanged',
+			data: {
+				indexh,
+				indexv,
+				previousSlide,
+				currentSlide,
+				origin
+			}
+		});
+
+	}
+
+	/**
 	 * Dispatched a postMessage of the given type from our window.
 	 */
 	function dispatchPostMessage( type, data ) {
@@ -709,170 +769,15 @@ export default function( revealElement, options ) {
 	}
 
 	/**
-	 * Bind preview frame links.
-	 *
-	 * @param {string} [selector=a] - selector for anchors
-	 */
-	function enablePreviewLinks( selector = 'a' ) {
-
-		Array.from( dom.wrapper.querySelectorAll( selector ) ).forEach( element => {
-			if( /^(http|www)/gi.test( element.getAttribute( 'href' ) ) ) {
-				element.addEventListener( 'click', onPreviewLinkClicked, false );
-			}
-		} );
-
-	}
-
-	/**
-	 * Unbind preview frame links.
-	 */
-	function disablePreviewLinks( selector = 'a' ) {
-
-		Array.from( dom.wrapper.querySelectorAll( selector ) ).forEach( element => {
-			if( /^(http|www)/gi.test( element.getAttribute( 'href' ) ) ) {
-				element.removeEventListener( 'click', onPreviewLinkClicked, false );
-			}
-		} );
-
-	}
-
-	/**
-	 * Opens a preview window for the target URL.
-	 *
-	 * @param {string} url - url for preview iframe src
-	 */
-	function showPreview( url ) {
-
-		closeOverlay();
-
-		dom.overlay = document.createElement( 'div' );
-		dom.overlay.classList.add( 'overlay' );
-		dom.overlay.classList.add( 'overlay-preview' );
-		dom.wrapper.appendChild( dom.overlay );
-
-		dom.overlay.innerHTML =
-			`<header>
-				<a class="close" href="#"><span class="icon"></span></a>
-				<a class="external" href="${url}" target="_blank"><span class="icon"></span></a>
-			</header>
-			<div class="spinner"></div>
-			<div class="viewport">
-				<iframe src="${url}"></iframe>
-				<small class="viewport-inner">
-					<span class="x-frame-error">Unable to load iframe. This is likely due to the site's policy (x-frame-options).</span>
-				</small>
-			</div>`;
-
-		dom.overlay.querySelector( 'iframe' ).addEventListener( 'load', event => {
-			dom.overlay.classList.add( 'loaded' );
-		}, false );
-
-		dom.overlay.querySelector( '.close' ).addEventListener( 'click', event => {
-			closeOverlay();
-			event.preventDefault();
-		}, false );
-
-		dom.overlay.querySelector( '.external' ).addEventListener( 'click', event => {
-			closeOverlay();
-		}, false );
-
-	}
-
-	/**
-	 * Open or close help overlay window.
-	 *
-	 * @param {Boolean} [override] Flag which overrides the
-	 * toggle logic and forcibly sets the desired state. True means
-	 * help is open, false means it's closed.
-	 */
-	function toggleHelp( override ){
-
-		if( typeof override === 'boolean' ) {
-			override ? showHelp() : closeOverlay();
-		}
-		else {
-			if( dom.overlay ) {
-				closeOverlay();
-			}
-			else {
-				showHelp();
-			}
-		}
-	}
-
-	/**
-	 * Opens an overlay window with help material.
-	 */
-	function showHelp() {
-
-		if( config.help ) {
-
-			closeOverlay();
-
-			dom.overlay = document.createElement( 'div' );
-			dom.overlay.classList.add( 'overlay' );
-			dom.overlay.classList.add( 'overlay-help' );
-			dom.wrapper.appendChild( dom.overlay );
-
-			let html = '<p class="title">Keyboard Shortcuts</p><br/>';
-
-			let shortcuts = keyboard.getShortcuts(),
-				bindings = keyboard.getBindings();
-
-			html += '<table><th>KEY</th><th>ACTION</th>';
-			for( let key in shortcuts ) {
-				html += `<tr><td>${key}</td><td>${shortcuts[ key ]}</td></tr>`;
-			}
-
-			// Add custom key bindings that have associated descriptions
-			for( let binding in bindings ) {
-				if( bindings[binding].key && bindings[binding].description ) {
-					html += `<tr><td>${bindings[binding].key}</td><td>${bindings[binding].description}</td></tr>`;
-				}
-			}
-
-			html += '</table>';
-
-			dom.overlay.innerHTML = `
-				<header>
-					<a class="close" href="#"><span class="icon"></span></a>
-				</header>
-				<div class="viewport">
-					<div class="viewport-inner">${html}</div>
-				</div>
-			`;
-
-			dom.overlay.querySelector( '.close' ).addEventListener( 'click', event => {
-				closeOverlay();
-				event.preventDefault();
-			}, false );
-
-		}
-
-	}
-
-	/**
-	 * Closes any currently open overlay.
-	 */
-	function closeOverlay() {
-
-		if( dom.overlay ) {
-			dom.overlay.parentNode.removeChild( dom.overlay );
-			dom.overlay = null;
-			return true;
-		}
-
-		return false;
-
-	}
-
-	/**
 	 * Applies JavaScript-controlled layout rules to the
 	 * presentation.
 	 */
 	function layout() {
 
-		if( dom.wrapper && !print.isPrintingPDF() ) {
+		if( dom.wrapper && !printView.isActive() ) {
+
+			const viewportWidth = dom.viewport.offsetWidth;
+			const viewportHeight = dom.viewport.offsetHeight;
 
 			if( !config.disableLayout ) {
 
@@ -886,7 +791,9 @@ export default function( revealElement, options ) {
 					document.documentElement.style.setProperty( '--vh', ( window.innerHeight * 0.01 ) + 'px' );
 				}
 
-				const size = getComputedSlideSize();
+				const size = scrollView.isActive() ?
+							 getComputedSlideSize( viewportWidth, viewportHeight ) :
+							 getComputedSlideSize();
 
 				const oldScale = scale;
 
@@ -903,8 +810,9 @@ export default function( revealElement, options ) {
 				scale = Math.max( scale, config.minScale );
 				scale = Math.min( scale, config.maxScale );
 
-				// Don't apply any scaling styles if scale is 1
-				if( scale === 1 ) {
+				// Don't apply any scaling styles if scale is 1 or we're
+				// in the scroll view
+				if( scale === 1 || scrollView.isActive() ) {
 					dom.slides.style.zoom = '';
 					dom.slides.style.left = '';
 					dom.slides.style.top = '';
@@ -932,7 +840,7 @@ export default function( revealElement, options ) {
 						continue;
 					}
 
-					if( config.center || slide.classList.contains( 'center' ) ) {
+					if( ( config.center || slide.classList.contains( 'center' ) ) ) {
 						// Vertical stacks are not centred since their section
 						// children will be
 						if( slide.classList.contains( 'stack' ) ) {
@@ -960,7 +868,13 @@ export default function( revealElement, options ) {
 				}
 			}
 
+			checkResponsiveScrollView();
+
 			dom.viewport.style.setProperty( '--slide-scale', scale );
+			dom.viewport.style.setProperty( '--viewport-width', viewportWidth + 'px' );
+			dom.viewport.style.setProperty( '--viewport-height', viewportHeight + 'px' );
+
+			scrollView.layout();
 
 			progress.update();
 			backgrounds.updateParallax();
@@ -981,7 +895,6 @@ export default function( revealElement, options ) {
 	 * @param {string|number} height
 	 */
 	function layoutSlideContents( width, height ) {
-
 		// Handle sizing of elements with the 'r-stretch' class
 		Util.queryAll( dom.slides, 'section > .stretch, section > .r-stretch' ).forEach( element => {
 
@@ -1009,6 +922,40 @@ export default function( revealElement, options ) {
 	}
 
 	/**
+	 * Responsively activates the scroll mode when we reach the configured
+	 * activation width.
+	 */
+	function checkResponsiveScrollView() {
+
+		// Only proceed if...
+		// 1. The DOM is ready
+		// 2. Layouts aren't disabled via config
+		// 3. We're not currently printing
+		// 4. There is a scrollActivationWidth set
+		// 5. The deck isn't configured to always use the scroll view
+		if(
+			dom.wrapper &&
+			!config.disableLayout &&
+			!printView.isActive() &&
+			typeof config.scrollActivationWidth === 'number' &&
+			config.view !== 'scroll'
+		) {
+			const size = getComputedSlideSize();
+
+			if( size.presentationWidth > 0 && size.presentationWidth <= config.scrollActivationWidth ) {
+				if( !scrollView.isActive() ) {
+					backgrounds.create();
+					scrollView.activate()
+				};
+			}
+			else {
+				if( scrollView.isActive() ) scrollView.deactivate();
+			}
+		}
+
+	}
+
+	/**
 	 * Calculates the computed pixel size of our slides. These
 	 * values are based on the width and height configuration
 	 * options.
@@ -1017,6 +964,7 @@ export default function( revealElement, options ) {
 	 * @param {number} [presentationHeight=dom.wrapper.offsetHeight]
 	 */
 	function getComputedSlideSize( presentationWidth, presentationHeight ) {
+
 		let width = config.width;
 		let height = config.height;
 
@@ -1104,6 +1052,19 @@ export default function( revealElement, options ) {
 	}
 
 	/**
+	 * Checks if the current or specified slide is a stack containing
+	 * vertical slides.
+	 *
+	 * @param {HTMLElement} [slide=currentSlide]
+	 * @return {Boolean}
+	 */
+	function isVerticalStack( slide = currentSlide ) {
+
+		return slide.classList.contains( '.stack' ) || slide.querySelector( 'section' ) !== null;
+
+	}
+
+	/**
 	 * Returns true if we're on the last slide in the current
 	 * vertical stack.
 	 */
@@ -1132,7 +1093,7 @@ export default function( revealElement, options ) {
 
 	/**
 	 * Returns true if we're currently on the last slide in
-	 * the presenation. If the last slide is a stack, we only
+	 * the presentation. If the last slide is a stack, we only
 	 * consider this the last slide if it's at the end of the
 	 * stack.
 	 */
@@ -1288,6 +1249,14 @@ export default function( revealElement, options ) {
 		// Query all horizontal slides in the deck
 		const horizontalSlides = dom.wrapper.querySelectorAll( HORIZONTAL_SLIDES_SELECTOR );
 
+		// If we're in scroll mode, we scroll the target slide into view
+		// instead of running our standard slide transition
+		if( scrollView.isActive() ) {
+			const scrollToSlide = scrollView.getSlideByIndices( h, v );
+			if( scrollToSlide ) scrollView.scrollToSlide( scrollToSlide );
+			return;
+		}
+
 		// Abort if there are no slides
 		if( horizontalSlides.length === 0 ) return;
 
@@ -1327,6 +1296,9 @@ export default function( revealElement, options ) {
 		let currentHorizontalSlide = horizontalSlides[ indexh ],
 			currentVerticalSlides = currentHorizontalSlide.querySelectorAll( 'section' );
 
+		// Indicate when we're on a vertical slide
+		revealElement.classList.toggle( 'is-vertical-slide', currentVerticalSlides.length > 1 );
+
 		// Store references to the previous and current slides
 		currentSlide = currentVerticalSlides[ indexv ] || currentHorizontalSlide;
 
@@ -1334,6 +1306,9 @@ export default function( revealElement, options ) {
 
 		// Detect if we're moving between two auto-animated slides
 		if( slideChanged && previousSlide && currentSlide && !overview.isActive() ) {
+			transition = 'running';
+
+			autoAnimateTransition = shouldAutoAnimateBetween( previousSlide, currentSlide, indexhBefore, indexvBefore );
 
 			// If this is an auto-animated transition, we disable the
 			// regular slide transition
@@ -1341,16 +1316,9 @@ export default function( revealElement, options ) {
 			// Note 20-03-2020:
 			// This needs to happen before we update slide visibility,
 			// otherwise transitions will still run in Safari.
-			if( previousSlide.hasAttribute( 'data-auto-animate' ) && currentSlide.hasAttribute( 'data-auto-animate' )
-					&& previousSlide.getAttribute( 'data-auto-animate-id' ) === currentSlide.getAttribute( 'data-auto-animate-id' )
-					&& !( ( indexh > indexhBefore || indexv > indexvBefore ) ? currentSlide : previousSlide ).hasAttribute( 'data-auto-animate-restart' ) ) {
-
-				autoAnimateTransition = true;
-				dom.slides.classList.add( 'disable-slide-transitions' );
+			if( autoAnimateTransition ) {
+				dom.slides.classList.add( 'disable-slide-transitions' )
 			}
-
-			transition = 'running';
-
 		}
 
 		// Update the visibility of slides now that the indices have changed
@@ -1409,16 +1377,7 @@ export default function( revealElement, options ) {
 		}
 
 		if( slideChanged ) {
-			dispatchEvent({
-				type: 'slidechanged',
-				data: {
-					indexh,
-					indexv,
-					previousSlide,
-					currentSlide,
-					origin
-				}
-			});
+			dispatchSlideChanged( origin );
 		}
 
 		// Handle embedded content
@@ -1464,6 +1423,71 @@ export default function( revealElement, options ) {
 	}
 
 	/**
+	 * Checks whether or not an auto-animation should take place between
+	 * the two given slides.
+	 *
+	 * @param {HTMLElement} fromSlide
+	 * @param {HTMLElement} toSlide
+	 * @param {number} indexhBefore
+	 * @param {number} indexvBefore
+	 *
+	 * @returns {boolean}
+	 */
+	function shouldAutoAnimateBetween( fromSlide, toSlide, indexhBefore, indexvBefore ) {
+
+		return 	fromSlide.hasAttribute( 'data-auto-animate' ) && toSlide.hasAttribute( 'data-auto-animate' ) &&
+				fromSlide.getAttribute( 'data-auto-animate-id' ) === toSlide.getAttribute( 'data-auto-animate-id' ) &&
+				!( ( indexh > indexhBefore || indexv > indexvBefore ) ? toSlide : fromSlide ).hasAttribute( 'data-auto-animate-restart' );
+
+	}
+
+	/**
+	 * Called anytime a new slide should be activated while in the scroll
+	 * view. The active slide is the page that occupies the most space in
+	 * the scrollable viewport.
+	 *
+	 * @param {number} pageIndex
+	 * @param {HTMLElement} slideElement
+	 */
+	function setCurrentScrollPage( slideElement, h, v ) {
+
+		let indexhBefore = indexh || 0;
+
+		indexh = h;
+		indexv = v;
+
+		const slideChanged = currentSlide !== slideElement;
+
+		previousSlide = currentSlide;
+		currentSlide = slideElement;
+
+		if( currentSlide && previousSlide ) {
+			if( config.autoAnimate && shouldAutoAnimateBetween( previousSlide, currentSlide, indexhBefore, indexv ) ) {
+				// Run the auto-animation between our slides
+				autoAnimate.run( previousSlide, currentSlide );
+			}
+		}
+
+		// Start or stop embedded content like videos and iframes
+		if( slideChanged ) {
+			if( previousSlide ) {
+				slideContent.stopEmbeddedContent( previousSlide );
+				slideContent.stopEmbeddedContent( previousSlide.slideBackgroundElement );
+			}
+
+			slideContent.startEmbeddedContent( currentSlide );
+			slideContent.startEmbeddedContent( currentSlide.slideBackgroundElement );
+		}
+
+		requestAnimationFrame( () => {
+			announceStatus( getStatusText( currentSlide ) );
+		});
+
+		dispatchSlideChanged();
+
+	}
+
+	/**
 	 * Syncs the presentation with the current DOM. Useful
 	 * when new slides or control elements are added or when
 	 * the configuration has changed.
@@ -1500,6 +1524,7 @@ export default function( revealElement, options ) {
 
 		notes.update();
 		notes.updateVisibility();
+		overlay.update();
 		backgrounds.update( true );
 		slideNumber.update();
 		slideContent.formatEmbeddedContent();
@@ -1608,7 +1633,7 @@ export default function( revealElement, options ) {
 		let slides = Util.queryAll( dom.wrapper, selector ),
 			slidesLength = slides.length;
 
-		let printMode = print.isPrintingPDF();
+		let printMode = scrollView.isActive() || printView.isActive();
 		let loopedForwards = false;
 		let loopedBackwards = false;
 
@@ -1720,7 +1745,7 @@ export default function( revealElement, options ) {
 	}
 
 	/**
-	 * Shows all fragment elements within the given contaienr.
+	 * Shows all fragment elements within the given container.
 	 */
 	function showFragmentsIn( container ) {
 
@@ -1732,7 +1757,7 @@ export default function( revealElement, options ) {
 	}
 
 	/**
-	 * Hides all fragment elements within the given contaienr.
+	 * Hides all fragment elements within the given container.
 	 */
 	function hideFragmentsIn( container ) {
 
@@ -1768,7 +1793,7 @@ export default function( revealElement, options ) {
 			}
 
 			// All slides need to be visible when exporting to PDF
-			if( print.isPrintingPDF() ) {
+			if( printView.isActive() ) {
 				viewDistance = Number.MAX_VALUE;
 			}
 
@@ -1999,21 +2024,31 @@ export default function( revealElement, options ) {
 
 		// If a slide is specified, return the indices of that slide
 		if( slide ) {
-			let isVertical = isVerticalSlide( slide );
-			let slideh = isVertical ? slide.parentNode : slide;
+			// In scroll mode the original h/x index is stored on the slide
+			if( scrollView.isActive() ) {
+				h = parseInt( slide.getAttribute( 'data-index-h' ), 10 );
 
-			// Select all horizontal slides
-			let horizontalSlides = getHorizontalSlides();
+				if( slide.getAttribute( 'data-index-v' ) ) {
+					v = parseInt( slide.getAttribute( 'data-index-v' ), 10 );
+				}
+			}
+			else {
+				let isVertical = isVerticalSlide( slide );
+				let slideh = isVertical ? slide.parentNode : slide;
 
-			// Now that we know which the horizontal slide is, get its index
-			h = Math.max( horizontalSlides.indexOf( slideh ), 0 );
+				// Select all horizontal slides
+				let horizontalSlides = getHorizontalSlides();
 
-			// Assume we're not vertical
-			v = undefined;
+				// Now that we know which the horizontal slide is, get its index
+				h = Math.max( horizontalSlides.indexOf( slideh ), 0 );
 
-			// If this is a vertical slide, grab the vertical index
-			if( isVertical ) {
-				v = Math.max( Util.queryAll( slide.parentNode, 'section' ).indexOf( slide ), 0 );
+				// Assume we're not vertical
+				v = undefined;
+
+				// If this is a vertical slide, grab the vertical index
+				if( isVertical ) {
+					v = Math.max( Util.queryAll( slide.parentNode, 'section' ).indexOf( slide ), 0 );
+				}
 			}
 		}
 
@@ -2175,7 +2210,8 @@ export default function( revealElement, options ) {
 			indexv: indices.v,
 			indexf: indices.f,
 			paused: isPaused(),
-			overview: overview.isActive()
+			overview: overview.isActive(),
+			...overlay.getState()
 		};
 
 	}
@@ -2201,6 +2237,8 @@ export default function( revealElement, options ) {
 			if( typeof overviewFlag === 'boolean' && overviewFlag !== overview.isActive() ) {
 				overview.toggle( overviewFlag );
 			}
+
+			overlay.setState( state );
 		}
 
 	}
@@ -2318,6 +2356,9 @@ export default function( revealElement, options ) {
 
 		navigationHistory.hasNavigatedHorizontally = true;
 
+		// Scroll view navigation is handled independently
+		if( scrollView.isActive() ) return scrollView.prev();
+
 		// Reverse for RTL
 		if( config.rtl ) {
 			if( ( overview.isActive() || skipFragments || fragments.next() === false ) && availableRoutes().left ) {
@@ -2335,6 +2376,9 @@ export default function( revealElement, options ) {
 
 		navigationHistory.hasNavigatedHorizontally = true;
 
+		// Scroll view navigation is handled independently
+		if( scrollView.isActive() ) return scrollView.next();
+
 		// Reverse for RTL
 		if( config.rtl ) {
 			if( ( overview.isActive() || skipFragments || fragments.prev() === false ) && availableRoutes().right ) {
@@ -2350,6 +2394,9 @@ export default function( revealElement, options ) {
 
 	function navigateUp({skipFragments=false}={}) {
 
+		// Scroll view navigation is handled independently
+		if( scrollView.isActive() ) return scrollView.prev();
+
 		// Prioritize hiding fragments
 		if( ( overview.isActive() || skipFragments || fragments.prev() === false ) && availableRoutes().up ) {
 			slide( indexh, indexv - 1 );
@@ -2360,6 +2407,9 @@ export default function( revealElement, options ) {
 	function navigateDown({skipFragments=false}={}) {
 
 		navigationHistory.hasNavigatedVertically = true;
+
+		// Scroll view navigation is handled independently
+		if( scrollView.isActive() ) return scrollView.next();
 
 		// Prioritize revealing fragments
 		if( ( overview.isActive() || skipFragments || fragments.next() === false ) && availableRoutes().down ) {
@@ -2375,6 +2425,9 @@ export default function( revealElement, options ) {
 	 * 3) Previous horizontal slide
 	 */
 	function navigatePrev({skipFragments=false}={}) {
+
+		// Scroll view navigation is handled independently
+		if( scrollView.isActive() ) return scrollView.prev();
 
 		// Prioritize revealing fragments
 		if( skipFragments || fragments.prev() === false ) {
@@ -2399,6 +2452,9 @@ export default function( revealElement, options ) {
 					let h = indexh - 1;
 					slide( h, v );
 				}
+				else if( config.rtl ) {
+					navigateRight({skipFragments});
+				}
 				else {
 					navigateLeft({skipFragments});
 				}
@@ -2414,6 +2470,9 @@ export default function( revealElement, options ) {
 
 		navigationHistory.hasNavigatedHorizontally = true;
 		navigationHistory.hasNavigatedVertically = true;
+
+		// Scroll view navigation is handled independently
+		if( scrollView.isActive() ) return scrollView.next();
 
 		// Prioritize revealing fragments
 		if( skipFragments || fragments.next() === false ) {
@@ -2543,7 +2602,6 @@ export default function( revealElement, options ) {
 	function onWindowResize( event ) {
 
 		layout();
-
 	}
 
 	/**
@@ -2581,24 +2639,6 @@ export default function( revealElement, options ) {
 				Reveal.layout();
 				Reveal.focus.focus(); // focus.focus :'(
 			}, 1 );
-		}
-
-	}
-
-	/**
-	 * Handles clicks on links that are set to preview in the
-	 * iframe overlay.
-	 *
-	 * @param {object} event
-	 */
-	function onPreviewLinkClicked( event ) {
-
-		if( event.currentTarget && event.currentTarget.hasAttribute( 'href' ) ) {
-			let url = event.currentTarget.getAttribute( 'href' );
-			if( url ) {
-				showPreview( url );
-				event.preventDefault();
-			}
 		}
 
 	}
@@ -2681,10 +2721,13 @@ export default function( revealElement, options ) {
 		availableFragments: fragments.availableRoutes.bind( fragments ),
 
 		// Toggles a help overlay with keyboard shortcuts
-		toggleHelp,
+		toggleHelp: overlay.toggleHelp.bind( overlay ),
 
 		// Toggles the overview mode on/off
 		toggleOverview: overview.toggle.bind( overview ),
+
+		// Toggles the scroll view on/off
+		toggleScrollView: scrollView.toggle.bind( scrollView ),
 
 		// Toggles the "black screen" mode on/off
 		togglePause,
@@ -2700,6 +2743,7 @@ export default function( revealElement, options ) {
 		isLastSlide,
 		isLastVerticalSlide,
 		isVerticalSlide,
+		isVerticalStack,
 
 		// State checks
 		isPaused,
@@ -2707,7 +2751,9 @@ export default function( revealElement, options ) {
 		isSpeakerNotes: notes.isSpeakerNotesWindow.bind( notes ),
 		isOverview: overview.isActive.bind( overview ),
 		isFocused: focus.isFocused.bind( focus ),
-		isPrintingPDF: print.isPrintingPDF.bind( print ),
+		isOverlayOpen: overlay.isOpen.bind( overlay ),
+		isScrollView: scrollView.isActive.bind( scrollView ),
+		isPrintView: printView.isActive.bind( printView ),
 
 		// Checks if reveal.js has been loaded and is ready for use
 		isReady: () => ready,
@@ -2716,13 +2762,17 @@ export default function( revealElement, options ) {
 		loadSlide: slideContent.load.bind( slideContent ),
 		unloadSlide: slideContent.unload.bind( slideContent ),
 
-		// Media playback
+		// Start/stop all media inside of the current slide
 		startEmbeddedContent: () => slideContent.startEmbeddedContent( currentSlide ),
 		stopEmbeddedContent: () => slideContent.stopEmbeddedContent( currentSlide, { unloadIframes: false } ),
 
-		// Preview management
-		showPreview,
-		hidePreview: closeOverlay,
+		// Lightbox previews
+		previewIframe: overlay.previewIframe.bind( overlay ),
+		previewImage: overlay.previewImage.bind( overlay ),
+		previewVideo: overlay.previewVideo.bind( overlay ),
+
+		showPreview: overlay.previewIframe.bind( overlay ), // deprecated in favor of showIframeLightbox
+		hidePreview: overlay.close.bind( overlay ),
 
 		// Adds or removes all internal event listeners
 		addEventListeners,
@@ -2780,6 +2830,8 @@ export default function( revealElement, options ) {
 		hasNavigatedHorizontally: () => navigationHistory.hasNavigatedHorizontally,
 		hasNavigatedVertically: () => navigationHistory.hasNavigatedVertically,
 
+		shouldAutoAnimateBetween,
+
 		// Adds/removes a custom key binding
 		addKeyBinding: keyboard.addKeyBinding.bind( keyboard ),
 		removeKeyBinding: keyboard.removeKeyBinding.bind( keyboard ),
@@ -2791,6 +2843,7 @@ export default function( revealElement, options ) {
 		registerKeyboardShortcut: keyboard.registerKeyboardShortcut.bind( keyboard ),
 
 		getComputedSlideSize,
+		setCurrentScrollPage,
 
 		// Returns the current scale of the presentation content
 		getScale: () => scale,
@@ -2827,18 +2880,20 @@ export default function( revealElement, options ) {
 		getStatusText,
 
 		// Controllers
-		print,
 		focus,
+		scroll: scrollView,
 		progress,
 		controls,
 		location,
 		overview,
+		keyboard,
 		fragments,
+		backgrounds,
 		slideContent,
 		slideNumber,
 
 		onUserInput,
-		closeOverlay,
+		closeOverlay: overlay.close.bind( overlay ),
 		updateSlidesVisibility,
 		layoutSlideContents,
 		transformSlides,
