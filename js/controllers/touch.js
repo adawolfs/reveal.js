@@ -1,5 +1,5 @@
-import { isAndroid } from '../utils/device.js'
-import { matches } from '../utils/util.js'
+import { isAndroid } from '../utils/device'
+import { matches } from '../utils/util'
 
 const SWIPE_THRESHOLD = 40;
 
@@ -18,10 +18,12 @@ export default class Touch {
 		this.touchStartY = 0;
 		this.touchStartCount = 0;
 		this.touchCaptured = false;
+		this.activePointers = new Map();
 
 		this.onPointerDown = this.onPointerDown.bind( this );
 		this.onPointerMove = this.onPointerMove.bind( this );
 		this.onPointerUp = this.onPointerUp.bind( this );
+		this.onPointerCancel = this.onPointerCancel.bind( this );
 		this.onTouchStart = this.onTouchStart.bind( this );
 		this.onTouchMove = this.onTouchMove.bind( this );
 		this.onTouchEnd = this.onTouchEnd.bind( this );
@@ -36,19 +38,13 @@ export default class Touch {
 		let revealElement = this.Reveal.getRevealElement();
 
 		if( 'onpointerdown' in window ) {
-			// Use W3C pointer events
 			revealElement.addEventListener( 'pointerdown', this.onPointerDown, false );
 			revealElement.addEventListener( 'pointermove', this.onPointerMove, false );
 			revealElement.addEventListener( 'pointerup', this.onPointerUp, false );
+			revealElement.addEventListener( 'pointercancel', this.onPointerCancel, false );
 		}
-		else if( window.navigator.msPointerEnabled ) {
-			// IE 10 uses prefixed version of pointer events
-			revealElement.addEventListener( 'MSPointerDown', this.onPointerDown, false );
-			revealElement.addEventListener( 'MSPointerMove', this.onPointerMove, false );
-			revealElement.addEventListener( 'MSPointerUp', this.onPointerUp, false );
-		}
+		// Fall back to touch events
 		else {
-			// Fall back to touch events
 			revealElement.addEventListener( 'touchstart', this.onTouchStart, false );
 			revealElement.addEventListener( 'touchmove', this.onTouchMove, false );
 			revealElement.addEventListener( 'touchend', this.onTouchEnd, false );
@@ -66,10 +62,7 @@ export default class Touch {
 		revealElement.removeEventListener( 'pointerdown', this.onPointerDown, false );
 		revealElement.removeEventListener( 'pointermove', this.onPointerMove, false );
 		revealElement.removeEventListener( 'pointerup', this.onPointerUp, false );
-
-		revealElement.removeEventListener( 'MSPointerDown', this.onPointerDown, false );
-		revealElement.removeEventListener( 'MSPointerMove', this.onPointerMove, false );
-		revealElement.removeEventListener( 'MSPointerUp', this.onPointerUp, false );
+		revealElement.removeEventListener( 'pointercancel', this.onPointerCancel, false );
 
 		revealElement.removeEventListener( 'touchstart', this.onTouchStart, false );
 		revealElement.removeEventListener( 'touchmove', this.onTouchMove, false );
@@ -216,7 +209,29 @@ export default class Touch {
 	 */
 	onTouchEnd( event ) {
 
+		// Media playback is only allowed as a direct result of a
+		// user interaction. Some mobile devices do not consider a
+		// 'touchmove' to be a direct user action. If this is the
+		// case, we fall back to starting playback here instead.
+		if( this.touchCaptured && !this.Reveal.slideContent.isAllowedToPlayAudio() ) {
+			this.Reveal.startEmbeddedContent( this.Reveal.getCurrentSlide() );
+		}
+
 		this.touchCaptured = false;
+
+	}
+
+	/**
+	 * Returns all active touch pointers in touch-like format.
+	 *
+	 * @return {Array}
+	 */
+	getActiveTouches() {
+
+		return Array.from( this.activePointers.values(), pointer => ({
+			clientX: pointer.clientX,
+			clientY: pointer.clientY
+		}) );
 
 	}
 
@@ -227,8 +242,9 @@ export default class Touch {
 	 */
 	onPointerDown( event ) {
 
-		if( event.pointerType === event.MSPOINTER_TYPE_TOUCH || event.pointerType === "touch" ) {
-			event.touches = [{ clientX: event.clientX, clientY: event.clientY }];
+		if( event.pointerType === "touch" ) {
+			this.activePointers.set( event.pointerId, event );
+			event.touches = this.getActiveTouches();
 			this.onTouchStart( event );
 		}
 
@@ -241,8 +257,9 @@ export default class Touch {
 	 */
 	onPointerMove( event ) {
 
-		if( event.pointerType === event.MSPOINTER_TYPE_TOUCH || event.pointerType === "touch" )  {
-			event.touches = [{ clientX: event.clientX, clientY: event.clientY }];
+		if( event.pointerType === "touch" )  {
+			this.activePointers.set( event.pointerId, event );
+			event.touches = this.getActiveTouches();
 			this.onTouchMove( event );
 		}
 
@@ -255,8 +272,24 @@ export default class Touch {
 	 */
 	onPointerUp( event ) {
 
-		if( event.pointerType === event.MSPOINTER_TYPE_TOUCH || event.pointerType === "touch" )  {
-			event.touches = [{ clientX: event.clientX, clientY: event.clientY }];
+		if( event.pointerType === "touch" )  {
+			this.activePointers.delete( event.pointerId );
+			event.touches = this.getActiveTouches();
+			this.onTouchEnd( event );
+		}
+
+	}
+
+	/**
+	 * Convert pointer cancel to touch end.
+	 *
+	 * @param {object} event
+	 */
+	onPointerCancel( event ) {
+
+		if( event.pointerType === "touch" ) {
+			this.activePointers.delete( event.pointerId );
+			event.touches = this.getActiveTouches();
 			this.onTouchEnd( event );
 		}
 
